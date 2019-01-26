@@ -1,14 +1,18 @@
+/** 
+ * 推荐
+ * * */
+
 const { createSingle ,findOne } = require("./sequelize");
 const { URL } = require('url')
 const http = require('http');
-const proxy = require('./proxys.js');
+let proxy = require('./proxys.js');
 const fs = require('fs');
 const helper = require("./helper");
 var zoneTags = [];
 var offset = 0;
 var timeout = 60*1000;
+var downloadTimeout = 5*60*1000;
 var proxyLen = proxy.length-1;
-
 //切换标签 detail在这里调用
 var zoneUrl = "http://api.vc.bilibili.com/clip/v1/video/zonelist?page=total&platform=pc";
 
@@ -62,8 +66,10 @@ async function filterViedeoList(url ,proxy ){
                 });
                 res.on('end', function() {
                     console.log('当次请求结束！' );
-                    if( html.indexOf("<") >-1 && html.indexOf(">")>-1){
+                    if( html.indexOf("<") >-1 && html.indexOf(">")>-1 && html.indexOf("DOCTYPE")>-1){
+                        //如果 返回的是 xml 
                         changeProxy();
+                        console.log( "html +++++++++++" , html)
                         reject("html")
                     }
                      resolve(html)
@@ -85,9 +91,9 @@ async function filterViedeoList(url ,proxy ){
 // 改變 代理IP
 function changeProxy(){
     console.log( "proxyLen++++" ,proxy[proxyLen] )
-    if(proxyLen <0){
+    if(proxyLen <=0){
         proxy = require('./proxys.js');
-        proxyLen = proxy.length-1 ;
+        proxyLen = proxy.length -1;
     }else{
         proxyLen--;
     };
@@ -95,11 +101,10 @@ function changeProxy(){
 //主函数
 async function detail(offset,index){
     try{
-        
         console.log( "offset +++++++" ,offset)
         console.log( "index +++++++" ,index)
-        var baseUrl = "http://api.vc.bilibili.com/clip/v1/video/search?page_size=30&need_playurl=0&next_offset=" + offset +'&has_more=1&order=new&tag='+encodeURI(zoneTags[index])+'&platform=pc';
-        changeProxy();
+        var baseUrl = "http://api.vc.bilibili.com/clip/v1/video/search?page_size=30&need_playurl=0&next_offset=" + offset +'&has_more=1&order=&tag='+encodeURI(zoneTags[index])+'&platform=pc';
+        // changeProxy();
         let resList = await filterViedeoList(baseUrl ,proxy[proxyLen]);
         resList = JSON.parse(resList ) ;
         let list = resList.data.items;
@@ -118,21 +123,28 @@ async function detail(offset,index){
                     data.videostauts = video == "下载成功"?"0" :"1" ;
                     data.imgstauts   = img   == "下载成功"?"0": "1" ;
                     await createSingle(data)
+                    await helper.sleep( helper.random(30 , 5 ) ) ;
                 }
             }catch(error){
                 console.log( "循环内容错误          "+error );
             };
         }
-        var nextOffset = resList.data.next_offset;
+        offset = resList.data.next_offset;
         if (resList.data.has_more == 1) {
-            console.log("OFFSET "+nextOffset)
+            console.log("OFFSET "+offset)
             // 一页数据爬取完成之后 暂停一段时间
             await helper.sleep( helper.random(30 , 10 ) ) ;
-            await detail(nextOffset,index);
+            await detail(offset,index);
         };
     }catch(err){
         console.log( "error+++" , err )
-        await detail( offset,index )
+        var newOffset = offset ;
+        if( err.indexOf("html")>-1){
+            newOffset = 0;
+        }
+        // proxy = require('./proxys.js');
+        // proxyLen = proxy.length -1;
+        await detail( newOffset,index )
     }
 };
 
@@ -149,6 +161,7 @@ async function download (uid,pic,url) {
         helper.mkdirsSync(dirPath)
         console.log('开始下载第' + uid + 'de视频');
         console.log('开始下载第 url  ++' , url );
+        console.log('开始下载第 图片  ++' , pic );
         var writeStream =await fs.createWriteStream(dirPath + uid + '.mp4');
         var writeStreamPng =await fs.createWriteStream(dirPath + uid + '.png');
         // request.post({url ,headers:header }).pipe(writeStream)
@@ -157,7 +170,7 @@ async function download (uid,pic,url) {
         var resultImg = await downloadSource( pic , {} ,writeStreamPng ) ;
         console.log("result 图片" , resultImg)
 
-        await helper.sleep( helper.random(10 , 3 ) ) ;
+        
         
         return { 
             video : resultVideo ,
@@ -185,7 +198,7 @@ async function download (uid,pic,url) {
         }
     };
 };
-// 同步下载 资源 报纸 上一个 stream pipe完成之后才进行下一个 stream  
+// 同步下载 资源 保证 上一个 stream pipe完成之后才进行下一个 stream  
 async function downloadSource( url , header ,stream ){
     return new Promise( (resolve , reject )=>{
         var parse =new URL(url);
@@ -194,12 +207,13 @@ async function downloadSource( url , header ,stream ){
             port:parse['port'],
             path:url,
             method: 'GET',
-            headers :header
+            headers :header,
+            timeout:timeout ,
         },async function(req,res){ 
-            console.log("req.statusCode  ++++++" ,req.statusCode )
+            console.log("req.statusCode  ++++++" ,req.statusCode)
             if( req.statusCode ===200 ){
                 await req.pipe(stream);
-                await stream.on('close', ()=>{
+                stream.on('close', ()=>{
                 })
                 req.on('end', function(){
                     resolve("下载成功")
@@ -208,9 +222,19 @@ async function downloadSource( url , header ,stream ){
                 resolve("err" , req.statusMessage )
             }
         })
+        // 请求 设置 timeout
+        req.setTimeout( downloadTimeout , ()=>{
+            changeProxy()
+            reject("timeout" )
+        })
         req.on("error",( err)=>{
             reject("err"+err);
         })
         req.end();
+        // 设置 Promise  返回时间 处理 文件 pipe() 时 长时间无响应的情况
+        setTimeout(()=>{
+            console.log("文件 pipe超时~~~")
+            resolve("err");
+        } , downloadTimeout)
     })
 }
